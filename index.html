@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>The Long Drive: Savegame Editor</title>
+    <meta charset="utf-8">
+    <meta name="language" content="english">
+    <style>
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: monospace;
+  background-color: #f0f0f0;
+  text-align: center;
+}
+
+ul {
+  padding-inline-start: 1em;
+}
+
+#upload-screen {
+  width: 100%;
+  height: 100%;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#upload-file {
+  display: none;
+}
+
+#upload-log {
+  font-size: 18pt;
+}
+
+#main {
+  display: none;
+  text-align: left;
+  width: 80%;
+  margin: 0 auto;
+}
+
+#controls {
+  text-align: center;
+  margin: 1em;
+}
+
+#savegame-explorer {
+  list-style: none;
+  width: 100%;
+}
+
+#savegame-explorer li {
+  width: 100%;
+  padding: 0.25em 0;
+  font-size: 16pt;
+}
+
+.property {
+  display: grid;
+  grid-template-areas: "name value";
+  grid-template-columns: 1fr 1fr;
+}
+
+.name {
+  grid-area: name;
+  text-align: left;
+  cursor: default;
+  overflow-x: auto;
+}
+
+.value {
+  grid-area: value;
+  text-align: right;
+  overflow-x: auto;
+  font-size: 12pt;
+}
+
+.value * {
+  text-align: right;
+}
+
+.object {
+  display: grid;
+  grid-template-areas:
+    "name"
+    "properties";
+}
+
+.object .fake-checkbox {
+  grid-area: name;
+  display: none;
+}
+
+.object label {
+  grid-area: name;
+  cursor: pointer;
+}
+
+.object .fake-checkbox + label::before {
+  content: "+";
+  margin-right: 0.3em;
+}
+
+.object .fake-checkbox:checked + label::before {
+  content: "-";
+}
+
+.object ul {
+  grid-area: properties;
+  display: none;
+}
+
+.object .fake-checkbox:checked ~ ul {
+  display: block;
+}
+
+    </style>
+  </head>
+  <body>
+    <div id="upload-screen">
+      <div>
+        <p>
+          <button type="button">
+            <label for="upload-file">
+              Browse a .tlds or .tldsp file
+            </label>
+          </button>
+          <input id="upload-file" type="file" accept=".tlds,.tldsp">
+        </p>
+        <p>or</p>
+        <p>Drag and drop a save game file here</p>
+        <p id="upload-log"></p>
+      </div>
+    </div>
+    <div id="main">
+      <div id="controls">
+        <p>Notice: Always backup your savegame before overwriting!</p>
+        <div>
+          <button type="button" id="controls-save">Save</button>
+          <button type="button" id="controls-expand-near">Expand Near Stuff</button>
+          <button type="button" id="controls-close">Close</button>
+        </div>
+      </div>
+      <hr>
+      <ul id="savegame-explorer">
+        <!--<li class="property">
+          <div class="name">
+            property
+          </div>
+          <div class="value">
+            <input type="number">
+          </div>
+        </li>
+        <li class="object">
+          <input type="checkbox" id="a">
+          <label for="a">nested-property</label>
+          <ul>
+            <li class="property">
+              <div class="name">
+                property
+              </div>
+              <div class="value">
+                value
+              </div>
+            </li>
+          </ul>
+        </li>-->
+      </ul>
+    </div>
+    <script>
+    /*
+    @licstart  The following is the entire license notice for the
+    JavaScript code in this page.
+
+    Copyright (C) 2021 57op
+
+    The JavaScript code in this page is free software: you can
+    redistribute it and/or modify it under the terms of the GNU
+    General Public License (GNU GPL) as published by the Free Software
+    Foundation, either version 3 of the License, or (at your option)
+    any later version.  The code is distributed WITHOUT ANY WARRANTY;
+    without even the implied warranty of MERCHANTABILITY or FITNESS
+    FOR A PARTICULAR PURPOSE.  See the GNU GPL for more details.
+
+    As additional permission under GNU GPL version 3 section 7, you
+    may distribute non-source (e.g., minimized or compacted) forms of
+    that code without the copy of the GNU GPL normally required by
+    section 4, provided you include this license notice and a URL
+    through which recipients can access the Corresponding Source.
+
+
+    @licend  The above is the entire license notice
+    for the JavaScript code in this page.
+    */
+    </script>
+    <script>
+'use strict'
+
+class Application {
+  constructor () {
+    this._uploadLog = document.getElementById('upload-log')
+    this.bindUploadEvents()
+  }
+
+  uploadLog (message) {
+    this._uploadLog.innerHTML = message
+  }
+
+  async parseFile (file) {
+    this.uploadLog('Reading file...')
+
+    const originalFileName = file.name
+    const bytes = new BytesReader(await file.arrayBuffer())
+    const records = []
+
+    this.uploadLog('Parsing file...')
+
+    try {
+      while (!bytes.eof()) {
+        const offset = bytes.offset
+        const recordType = new RecordTypeEnumeration(bytes).Type
+        bytes.offset = offset // move back
+
+        if(!recordType) {
+          throw new Error('could not parse this file')
+        }
+
+        records.push(new recordType(bytes))
+      }
+    } catch (e) { }
+
+    // check if RootId object exits
+    const rootObject = bytes.refs.objects[records[0]?.RootId]
+
+    if (records.length === 0 || rootObject === undefined) {
+      this.uploadLog('Error: unable to parse input file. Are you sure is a valid TLD save game? Try again.')
+      return
+    }
+
+    this.uploadLog('Parsed successfully')
+
+    this.originalFileName = originalFileName
+    this.bytes = bytes
+    this.rootObject = rootObject
+
+    // generate ui
+    this.generateTreeView()
+  }
+
+  generateTreeView () {
+    this.uploadLog('Generating GUI: It might take several seconds, be patient...')
+    const saveGameExplorer = document.getElementById('savegame-explorer')
+    const { rootObject } = this
+
+    function visit (object, parent, prefix = '') {
+      const length = object?.Length ?? object.ClassInfo.MemberCount
+
+      for (let i = 0; i < length; i++) {
+        const name = object?.ClassInfo?.MemberNames[i] ?? i
+        let value = object.Values[i]
+
+        // unwrap memberreference
+        if (value instanceof MemberReference) {
+          value = value.Value
+        }
+
+        // nothing to do with null
+        if (value instanceof ObjectNull) {
+          continue
+        }
+
+        const liEl = document.createElement('li')
+        parent.appendChild(liEl)
+
+        if (
+          [MemberPrimitiveTyped, MemberPrimitiveUntyped, BinaryObjectString]
+            .some(t => value instanceof t)) {
+          // unwrap memberprimitivetyped and binaryobjectstring
+          if (
+            [MemberPrimitiveTyped, BinaryObjectString]
+              .some(t => value instanceof t)) {
+            value = value.Value
+          }
+
+          // check if editable
+          const editable =
+            [PrimitiveBoolean, PrimitiveInt32, PrimitiveSingle, PrimitiveDouble]
+              .some(t => value instanceof t)
+          const nameEl = document.createElement('div')
+          const valueEl = document.createElement('div')
+
+          liEl.classList.add('property')
+          nameEl.classList.add('name')
+          valueEl.classList.add('value')
+
+          liEl.appendChild(nameEl)
+          liEl.appendChild(valueEl)
+
+          nameEl.appendChild(document.createTextNode(name))
+          nameEl.title = name
+
+          if (editable) {
+            const input = document.createElement('input')
+
+            if (value instanceof PrimitiveBoolean) {
+              input.type = 'checkbox'
+              input.checked = value.Value
+
+              input.addEventListener('input', () => {
+                value.Value = input.checked
+              })
+            } else {
+              input.value = value.Value
+              input.type = 'text'
+
+              input.addEventListener('input', () => {
+                value.Value = input.value
+              })
+            }
+
+            valueEl.appendChild(input)
+          } else {
+            valueEl.appendChild(document.createTextNode(value.Value))
+          }
+        } else {
+          const ulEl = document.createElement('ul')
+          const propId = `${prefix}${name}`
+          const labelEl = document.createElement('label')
+          const checkboxEl = document.createElement('input')
+
+          liEl.classList.add('object')
+
+          labelEl.htmlFor = propId
+          labelEl.title = name
+          labelEl.appendChild(document.createTextNode(name))
+
+          checkboxEl.classList.add('fake-checkbox')
+          checkboxEl.id = propId
+          checkboxEl.type = 'checkbox'
+
+          liEl.appendChild(checkboxEl)
+          liEl.appendChild(labelEl)
+          liEl.appendChild(ulEl)
+
+          visit(value, ulEl, `${propId}.`)
+        }
+      }
+    }
+
+    // render previous message
+    setTimeout(() => {
+      visit(rootObject, saveGameExplorer)
+
+      document.getElementById('upload-screen').style.display = 'none'
+      document.getElementById('main').style.display = 'block'
+
+      this.bindControlsEvents()
+    }, 50)
+
+  }
+
+  bindUploadEvents () {
+    const uploadScreen = document.getElementById('upload-screen')
+    const fileUpload = document.getElementById('upload-file')
+
+    uploadScreen
+      .addEventListener('dragover', e => {
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+      })
+
+    uploadScreen
+      .addEventListener('drop', async e => {
+        e.preventDefault()
+        await this.parseFile(e.dataTransfer.files[0])
+      })
+
+    fileUpload
+      .addEventListener('input', async e => {
+        await this.parseFile(e.target.files[0])
+      })
+  }
+
+  bindControlsEvents () {
+    document.getElementById('controls-save')
+      .addEventListener('click', () => {
+        const name = `${this.originalFileName}`
+        const file =
+          new File(
+            [this.bytes._arrayBuffer],
+            name,
+            { type: 'application/octet-stream' })
+
+        location.href = URL.createObjectURL(file)
+      })
+
+    document.getElementById('controls-expand-near')
+      .addEventListener('click', () => {
+        const nearStuffEl = document.getElementById('nearStuff')
+
+        if (nearStuffEl) {
+          for (const cb of nearStuffEl.parentNode.querySelectorAll('.object .fake-checkbox')) {
+            cb.checked = true
+          }
+        }
+      })
+
+    document.getElementById('controls-close')
+      .addEventListener('click', () => {
+        document.getElementById('upload-screen').style.display = 'flex'
+        document.getElementById('main').style.display = 'none'
+        document.getElementById('savegame-explorer').innerHTML = ''
+        this.uploadLog('')
+      })
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const app = new Application()
+})
+
+// parser definitions
+class BytesReader {
+  constructor (arrayBuffer, offset = 0) {
+    this._arrayBuffer = arrayBuffer
+    this._offset = offset
+    this.refs = {
+      root: undefined,
+      libraries: {},
+      objects: {}
+    }
+  }
+
+  view (byteLength) {
+    const { _arrayBuffer, _offset } = this
+    this._offset += byteLength
+    return new DataView(_arrayBuffer, _offset, byteLength)
+  }
+
+  get arrayBuffer () {
+    return this._arrayBuffer
+  }
+
+  get offset () {
+    return this._offset
+  }
+
+  set offset (value) {
+    this._offset = value
+  }
+
+  eof () {
+    const { _offset, _arrayBuffer } = this
+    return _offset >= _arrayBuffer.byteLength
+  }
+}
+// parser definitions
+
+
+// record definitions
+class SerializedStreamHeader {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._RootId = bytes.view(4)
+    this._HeaderId = bytes.view(4)
+    this._MajorVersion = bytes.view(4)
+    this._MinorVersion = bytes.view(4)
+
+    // ignore HeaderId on read
+    if (this.MajorVersion !== 1 && this.MinorVersion !== 0) {
+      throw new Error('invalid header')
+    }
+
+    bytes.refs.root = this.RootId
+  }
+
+  get RootId () {
+    return this._RootId.getInt32(0, true)
+  }
+
+  set RootId (value) {
+    this._RootId.setInt32(0, value, true)
+  }
+
+  get HeaderId () {
+    return this._HeaderId.getInt32(0, true)
+  }
+
+  get MajorVersion () {
+    return this._MajorVersion.getInt32(0, true)
+  }
+
+  get MinorVersion () {
+    return this._MinorVersion.getInt32(0, true)
+  }
+}
+
+// class records
+class ClassInfo {
+  constructor (bytes, parentClass) {
+    this._ObjectId = bytes.view(4)
+    this._Name = new LengthPrefixedString(bytes)
+    this._MemberCount = bytes.view(4)
+    this._MemberNames = []
+
+    for (let i = 0; i < this.MemberCount; i++) {
+      this._MemberNames.push(new LengthPrefixedString(bytes))
+    }
+
+    bytes.refs.objects[this.ObjectId] = parentClass
+  }
+
+  get ObjectId () {
+    return this._ObjectId.getInt32(0, true)
+  }
+
+  get Name () {
+    return this._Name.Value
+  }
+
+  get MemberCount () {
+    return this._MemberCount.getInt32(0, true)
+  }
+
+  get MemberNames () {
+    return this._MemberNames.map(lps => lps.Value)
+  }
+}
+
+class MemberTypeInfo {
+  constructor (bytes, classInfo) {
+    this._BinaryTypeEnums = []
+    this.AdditionalInfos = []
+
+    for (let i = 0; i < classInfo.MemberCount; i++) {
+      this._BinaryTypeEnums.push(new BinaryTypeEnumeration(bytes))
+    }
+
+    for (const binaryType of this.BinaryTypeEnums) {
+      if (['Primitive', 'PrimitiveArray'].includes(binaryType)) {
+        const type = new PrimitiveTypeEnumeration(bytes)
+
+        // TODO: only on primitive and not primitive array?
+        if (['Null', PrimitiveString].includes(type.Type)) {
+          throw new Error('When the BinaryTypeEnum value is Primitive, the PrimitiveTypeEnumeration value in AdditionalInfo MUST NOT be Null (17) or String (18).')
+        }
+
+        this.AdditionalInfos.push(type.Type)
+      } else if (binaryType === 'SystemClass') {
+        this.AdditionalInfos.push(new LengthPrefixedString(bytes))
+      } else if (binaryType === 'Class') {
+        this.AdditionalInfos.push(new ClassTypeInfo(bytes))
+      } else {
+        // push null to align proper type to MemberNames
+        this.AdditionalInfos.push(null)
+      }
+    }
+  }
+
+  get BinaryTypeEnums () {
+    return this._BinaryTypeEnums.map(bte => bte.Type)
+  }
+}
+
+class ClassRecord {}
+
+class ClassWithId extends ClassRecord {
+  constructor (bytes) {
+    super()
+
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._ObjectId = bytes.view(4)
+    this._MetadataId = bytes.view(4)
+
+    if (this.ObjectId >= 0) {
+      bytes.refs.objects[this.ObjectId] = this
+    }
+
+    const metadata = bytes.refs.objects[this.MetadataId]
+    console.assert(metadata !== undefined)
+
+    this.ClassInfo = metadata.ClassInfo
+    this.MemberTypeInfo = metadata.MemberTypeInfo
+    this.Values = []
+
+    // parse values
+    /*
+     * The values of the Members of the Class (1) MUST be serialized as records that follow this record, as
+     * specified in section 2.7. The order of the records MUST match the order of MemberNames as specified
+     * in the ClassInfo (section 2.3.1.1) structure.
+     */
+     for (let i = 0; i < this.ClassInfo.MemberCount; i++) {
+      const name  = this.ClassInfo.MemberNames[i]
+      const bte   = this.MemberTypeInfo.BinaryTypeEnums[i]
+      const aInfo = this.MemberTypeInfo.AdditionalInfos[i]
+
+      if (bte === 'Primitive') {
+        // MemberPrimitiveUnTyped
+        // The record MUST be used when a Class Member or Array item is a Primitive Type
+        this.Values.push(new aInfo(bytes))
+      } else {
+        // anything else must be parsed as a record
+        const offset = bytes.offset
+        const recordType = new RecordTypeEnumeration(bytes)
+        bytes.offset = offset // move back
+        this.Values.push(new recordType.Type(bytes))
+      }
+    }
+  }
+
+  get ObjectId () {
+    return this._ObjectId.getInt32(0, true)
+  }
+
+  get MetadataId () {
+    return this._MetadataId.getInt32(0, true)
+  }
+}
+
+class SystemClassWithMembersAndTypes extends ClassRecord {
+  constructor (bytes) {
+    super()
+
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this.ClassInfo = new ClassInfo(bytes, this)
+    this.MemberTypeInfo = new MemberTypeInfo(bytes, this.ClassInfo)
+    this.Values = []
+
+    // parse values
+    /*
+     * The values of the Members of the Class (1) MUST be serialized as records that follow this record, as
+     * specified in section 2.7. The order of the records MUST match the order of MemberNames as specified
+     * in the ClassInfo (section 2.3.1.1) structure.
+     */
+     for (let i = 0; i < this.ClassInfo.MemberCount; i++) {
+      const name  = this.ClassInfo.MemberNames[i]
+      const bte   = this.MemberTypeInfo.BinaryTypeEnums[i]
+      const aInfo = this.MemberTypeInfo.AdditionalInfos[i]
+
+      if (bte === 'Primitive') {
+        // MemberPrimitiveUnTyped
+        // The record MUST be used when a Class Member or Array item is a Primitive Type
+        this.Values.push(new aInfo(bytes))
+      } else {
+        // anything else must be parsed as a record
+        const offset = bytes.offset
+        const recordType = new RecordTypeEnumeration(bytes)
+        bytes.offset = offset // move back
+        this.Values.push(new recordType.Type(bytes))
+      }
+    }
+  }
+}
+
+class ClassWithMembersAndTypes extends ClassRecord {
+  constructor (bytes) {
+    super()
+
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this.ClassInfo = new ClassInfo(bytes, this)
+    this.MemberTypeInfo = new MemberTypeInfo(bytes, this.ClassInfo)
+    this._LibraryId = bytes.view(4)
+    this.Values = []
+
+    // A BinaryLibrary record with the LibraryId MUST appear earlier in the serialization stream.
+    console.assert(bytes.refs.libraries[this.LibraryId] !== undefined)
+
+    // parse values
+    /*
+     * The values of the Members of the Class (1) MUST be serialized as records that follow this record, as
+     * specified in section 2.7. The order of the records MUST match the order of MemberNames as specified
+     * in the ClassInfo (section 2.3.1.1) structure.
+     */
+    for (let i = 0; i < this.ClassInfo.MemberCount; i++) {
+      const name  = this.ClassInfo.MemberNames[i]
+      const bte   = this.MemberTypeInfo.BinaryTypeEnums[i]
+      const aInfo = this.MemberTypeInfo.AdditionalInfos[i]
+
+      if (bte === 'Primitive') {
+        // MemberPrimitiveUnTyped
+        // The record MUST be used when a Class Member or Array item is a Primitive Type
+        this.Values.push(new aInfo(bytes))
+      } else {
+        // anything else must be parsed as a record
+        const offset = bytes.offset
+        const recordType = new RecordTypeEnumeration(bytes)
+        bytes.offset = offset // move back
+        this.Values.push(new recordType.Type(bytes))
+      }
+    }
+  }
+
+  get LibraryId () {
+    return this._LibraryId.getInt32(0, true)
+  }
+}
+
+// classwithmembers
+// systemclasswithmembersandtypes
+// systemclasswithmembers
+// classwithid
+// /class records
+
+class BinaryObjectString {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._ObjectId = bytes.view(4)
+    this.Value = new LengthPrefixedString(bytes)
+
+    // uniquely identifies the string instance in the serialization stream
+    bytes.refs.objects[this.ObjectId] = this._Value
+  }
+
+  get ObjectId () {
+    return this._ObjectId.getInt32(0, true)
+  }
+}
+
+class MemberPrimitiveTyped {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._PrimitiveTypeEnum = new PrimitiveTypeEnumeration(bytes)
+    this./*_*/Value = new this._PrimitiveTypeEnum.Type(bytes)
+  }
+
+  /*get Value () {
+    return this._Value.Value
+  }*/
+}
+
+class MemberReference {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._IdRef = bytes.view(4)
+
+    if (this.IdRef < 0) {
+      throw new Error('The value MUST be a positive integer.')
+    }
+
+    // TODO: should also check if the referenced object exists
+    // but cannot do it now, because the object may appear after the referencing record
+    this._bytes = bytes
+  }
+
+  get IdRef () {
+    return this._IdRef.getInt32(0, true)
+  }
+
+  get Value () {
+    return this._bytes.refs.objects[this.IdRef]
+  }
+}
+
+class BinaryLibrary {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._LibraryId = bytes.view(4)
+    this._LibraryName = new LengthPrefixedString(bytes)
+
+    bytes.refs.libraries[this.LibraryId] = this
+  }
+
+  get RecordTypeEnum () {
+    return this._RecordTypeEnum.getUint8(0)
+  }
+
+  get LibraryId() {
+    return this._LibraryId.getInt32(0, true)
+  }
+
+  get LibraryName () {
+    return this._LibraryName.Value
+  }
+}
+
+class ArrayInfo {
+  constructor (bytes, parentArray) {
+    this._ObjectId = bytes.view(4)
+    this._Length = bytes.view(4)
+
+    bytes.refs.objects[this.ObjectId] = parentArray
+  }
+
+  get ObjectId () {
+    return this._ObjectId.getInt32(0, true)
+  }
+
+  get Length () {
+    return this._Length.getInt32(0, true)
+  }
+}
+
+class BinaryArrayTypeEnumeration {
+  static type_map = {
+    0: 'Single',
+    1: 'Jagged',
+    2: 'Rectangular',
+    3: 'SingleOffset',
+    4: 'JaggedOffset',
+    5: 'RectangularOffset'
+  }
+
+  constructor (bytes) {
+    this._Type = bytes.view(1)
+  }
+
+  get Type () {
+    return BinaryArrayTypeEnumeration.type_map[this._Type.getUint8(0)]
+  }
+}
+
+class ArrayRecord {}
+
+class ArraySinglePrimitive extends ArrayRecord {
+  constructor (bytes) {
+    super()
+
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this.ArrayInfo = new ArrayInfo(bytes, this)
+    this._PrimitiveTypeEnum = new PrimitiveTypeEnumeration(bytes)
+
+    this.Values = []
+    this.Length = this.ArrayInfo.Length
+
+    for (let i = 0; i < this.ArrayInfo.Length; i++) {
+      this.Values.push(new this._PrimitiveTypeEnum.Type(bytes))
+    }
+  }
+}
+
+class BinaryArray extends ArrayRecord {
+  constructor (bytes) {
+    super()
+
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+    this._ObjectId = bytes.view(4)
+    this._BinaryArrayTypeEnum = new BinaryArrayTypeEnumeration(bytes)
+    this._Rank = bytes.view(4)
+    this._Lengths = []
+
+    for (let i = 0; i < this.Rank; i++) {
+      this._Lengths.push(bytes.view(4))
+    }
+
+    this._LowerBounds = []
+
+    if (['SingleOffset', 'JaggedOffset', 'RectangularOffset'].includes(this.BinaryArrayTypeEnum)) {
+      for (let i = 0; i < this.Rank; i++) {
+        this._LowerBounds.push(bytes.view(4))
+      }
+    }
+
+    if (this.Rank > 1 || this._LowerBounds.length > 0) {
+      throw new Error('not implemented')
+    }
+
+    this._TypeEnum = new BinaryTypeEnumeration(bytes)
+    this._AdditionalTypeInfo = null
+    this.Values = []
+    bytes.refs.objects[this.ObjectId] = this
+
+    if (!['Object', 'String', 'ObjectArray', 'StringArray'].includes(this.TypeEnum)) {
+      if (this.TypeEnum === 'Primitive') {
+        this._AdditionalTypeInfo = new PrimitiveTypeEnumeration(bytes)
+        // TODO: if null or string, error
+      } else if (this.TypeEnum === 'SystemClass') {
+        this._AdditionalTypeInfo = new LengthPrefixedString(bytes)
+      } else if (this.TypeEnum === 'Class') {
+        this._AdditionalTypeInfo = new ClassTypeInfo(bytes)
+      } else if (this.TypeEnum === 'PrimitiveArray') {
+        this._AdditionalTypeInfo = new PrimitiveTypeEnumeration(bytes)
+      }
+    }
+
+    for (let i = 0; i < this.Length; i++) {
+      const offset = bytes.offset
+      const recordType = new RecordTypeEnumeration(bytes)
+      bytes.offset = offset // move back
+      this.Values.push(new recordType.Type(bytes))
+    }
+  }
+
+  get ObjectId () {
+    return this._ObjectId.getInt32(0, true)
+  }
+
+  get Rank () {
+    return this._Rank.getInt32(0, true)
+  }
+
+  get Lengths () {
+    return this._Lengths.map(l => l.getInt32(0, true))
+  }
+
+  get Length () {
+    // the number of records containing Array items MUST be equal to the product of the values contained in the Lengths field of the BinaryArray record
+    return this.Lengths.reduce((a, b) => a * b)
+  }
+
+  get BinaryArrayTypeEnum () {
+    return this._BinaryArrayTypeEnum.Type
+  }
+
+  get TypeEnum () {
+    return this._TypeEnum.Type
+  }
+}
+
+class ObjectNull {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+  }
+}
+
+class MessageEnd {
+  constructor (bytes) {
+    this._RecordTypeEnum = new RecordTypeEnumeration(bytes)
+  }
+}
+
+// member reference records
+// memberprimitiveuntyped
+class MemberPrimitiveUntyped {}
+
+class PrimitiveBoolean extends MemberPrimitiveUntyped {
+  constructor (bytes) {
+    super()
+    this._Value = bytes.view(1)
+  }
+
+  get Value () {
+    return !!this._Value.getUint8(0)
+  }
+
+  set Value (value) {
+    this._Value.setUint8(0, !!value)
+  }
+}
+
+// ...
+
+class PrimitiveDouble extends MemberPrimitiveUntyped {
+  constructor (bytes) {
+    super()
+    this._Value = bytes.view(8)
+  }
+
+  get Value () {
+    return this._Value.getFloat64(0, true)
+  }
+
+  set Value (value) {
+    value = +value
+
+    if (!isNaN(value)) {
+      this._Value.setFloat64(0, value, true)
+    }
+  }
+}
+
+class PrimitiveInt32 extends MemberPrimitiveUntyped {
+  constructor (bytes) {
+    super()
+    this._Value = bytes.view(4)
+  }
+
+  get Value () {
+    return this._Value.getInt32(0, true)
+  }
+
+  set Value (value) {
+    value = +value
+
+    if (!isNaN(value)) {
+      this._Value.setInt32(0, value | 0, true)
+    }
+  }
+}
+
+class PrimitiveSingle extends MemberPrimitiveUntyped {
+  constructor (bytes) {
+    super()
+    this._Value = bytes.view(4)
+  }
+
+  get Value () {
+    return this._Value.getFloat32(0, true)
+  }
+
+  set Value (value) {
+    value = +value
+
+    if (!isNaN(value)) {
+      this._Value.setFloat32(0, value, true)
+    }
+  }
+}
+
+class PrimitiveString extends MemberPrimitiveUntyped {
+  constructor (bytes) {
+    super()
+    this._Value = new LengthPrefixedString(bytes)
+  }
+
+  get Value () {
+    return this._Value.Value
+  }
+}
+// memberprimitiveuntyped
+// /member reference recors
+// /record definitions
+
+// common definitions
+// data types
+class LengthPrefixedString {
+  constructor (bytes) {
+    const offset = bytes.offset
+    const [length, index] = LengthPrefixedString._parse_length(bytes.view(5))
+
+    // move offset back to beginning
+    bytes.offset = offset
+    this._Length = bytes.view(index + 1)
+    this._String = bytes.view(length)
+  }
+
+  static _parse_length (view) {
+    let length = 0
+    let index = 0
+
+    for (; index < view.byteLength; index++) {
+      const byte = view.getUint8(index)
+      // use lower bits, shift accordingly
+      length |= (byte & 0x7f) << (index * 7)
+
+      // continuation bit is 0
+      if ((byte & 0x80) !== 0x80) {
+        break;
+      }
+
+      // last byte, continuation bit is 1, unrecovable error
+      if (index === 4) {
+        throw new Error('continuation bit is 1 on last possible byte')
+      }
+    }
+
+    return [length, index]
+  }
+
+  get Length () {
+    return LengthPrefixedString._parse_length(this._Length)[0]
+  }
+
+  get Value () {
+    return new TextDecoder('utf-8', { fatal: true }).decode(this._String)
+  }
+}
+
+class ClassTypeInfo {
+  constructor (bytes) {
+    this._TypeName = new LengthPrefixedString(bytes)
+    this._LibraryId = bytes.view(4)
+  }
+
+  get TypeName () {
+    return this._TypeName.Value
+  }
+
+  get LibraryId () {
+    return this._LibraryId.getInt32(0, true)
+  }
+}
+// data types
+
+// enumerations
+class RecordTypeEnumeration {
+  static type_map = {
+    0: SerializedStreamHeader,
+    1: ClassWithId,
+    // ...
+    4: SystemClassWithMembersAndTypes,
+    5: ClassWithMembersAndTypes,
+    6: BinaryObjectString,
+    7: BinaryArray,
+    8: MemberPrimitiveTyped,
+    9: MemberReference,
+    10: ObjectNull,
+    11: MessageEnd,
+    12: BinaryLibrary,
+    15: ArraySinglePrimitive
+  }
+
+  constructor (bytes) {
+    this._Type = bytes.view(1)
+  }
+
+  get Type () {
+    return RecordTypeEnumeration.type_map[this._Type.getUint8(0)]
+  }
+}
+
+class BinaryTypeEnumeration {
+  static type_map = {
+    0: 'Primitive',
+    1: 'String',
+    2: 'Object',
+    3: 'SystemClass',
+    4: 'Class',
+    5: 'ObjectArray',
+    6: 'StringArray',
+    7: 'PrimitiveArray'
+  }
+
+  constructor (bytes) {
+    this._Type = bytes.view(1)
+  }
+
+  get Type () {
+    return BinaryTypeEnumeration.type_map[this._Type.getUint8(0)]
+  }
+}
+
+class PrimitiveTypeEnumeration {
+  static type_map = {
+    1: PrimitiveBoolean,
+    2: 'Byte',
+    3: 'Char',
+    // 4 unused
+    5: 'Decimal',
+    6: PrimitiveDouble,
+    7: 'Int16',
+    8: PrimitiveInt32,
+    9: 'Int64',
+    10: 'SByte', // int8, signed byte
+    11: PrimitiveSingle,
+    12: 'TimeSpan',
+    13: 'DateTime',
+    14: 'UInt16',
+    15: 'UInt32',
+    16: 'UInt64',
+    17: 'Null',
+    18: PrimitiveString
+  }
+
+  constructor (bytes) {
+    this._Type = bytes.view(1)
+  }
+
+  get Type () {
+    return PrimitiveTypeEnumeration.type_map[this._Type.getUint8(0)]
+  }
+}
+// /enumerations
+// /common definitions
+    </script>
+  </body>
+</html>
